@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------
+# Скрипт: выпуск сертификата (Let's Encrypt) для ноды
+# Hysteria2 + генерация docker-compose.yml с прокинутыми
+# сертификатами внутрь контейнера remnanode.
+# ---------------------------------------------------------
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Запусти скрипт от root (sudo)." >&2
+  exit 1
+fi
+
+echo "=== Настройка сертификата для ноды Hysteria2 ==="
+
+read -rp "Введите домен ноды (например node-g1.benzin98.ru): " DOMAIN
+read -rp "Введите email для Let's Encrypt: " EMAIL
+read -rp "Введите SECRET_KEY ноды (из панели Remnawave): " SECRET_KEY
+
+if [[ -z "$DOMAIN" || -z "$EMAIL" || -z "$SECRET_KEY" ]]; then
+  echo "Домен, email и SECRET_KEY обязательны." >&2
+  exit 1
+fi
+
+CERT_DIR="/var/lib/remnawave/configs/xray/ssl"
+COMPOSE_DIR="/opt/remnanode"
+LE_LIVE_DIR="/etc/letsencrypt/live/${DOMAIN}"
+
+# --- Установка certbot, если его нет ---
+if ! command -v certbot &>/dev/null; then
+  echo ">> Устанавливаю certbot..."
+  apt-get update -y
+  apt-get install -y certbot
+fi
+
+# --- Проверка порта 80 (нужен для HTTP-01 challenge) ---
+if ss -ltn | grep -q ':80 '; then
+  echo "Порт 80 занят — освободи его (например останови nginx) и запусти скрипт заново." >&2
+  exit 1
+fi
+
+# --- Выпуск / обновление сертификата ---
+echo ">> Получаю сертификат для ${DOMAIN}..."
+certbot certonly \
+  --standalone \
+  --preferred-challenges http \
+  --http-01-port 80 \
+  -d "$DOMAIN" \
+  -m "$EMAIL" \
+  --agree-tos \
+  --non-interactive \
+  --keep-until-expiring
+
+if [[ ! -f "${LE_LIVE_DIR}/fullchain.pem" ]]; then
+  echo "Не удалось найти выпущенный сертификат в ${LE_LIVE_DIR}" >&2
+  exit 1
+fi
+
+# --- Копируем в место, которое ждёт xray-конфиг ---
+mkdir -p "$CERT_DIR"
+cp -L "${LE_LIVE_DIR}/fullchain.pem" "${CERT_DIR}/cert.pem"
+cp -L "${LE_LIVE_DIR}/privkey.pem" "${CERT_DIR}/cert.key"
+chmod 644 "${CERT_DIR}/cert.pem"
+chmod 600 "${CERT_DIR}/cert.key"
+echo ">> Сертификат скопирован в ${CERT_DIR}"
+
+# --- Автообновление: копировать сертификат и рестартовать контейнер после renew ---
+HOOK_DIR="/etc/letsencrypt/renewal-hooks/deploy"
+mkdir -p "$HOOK_DIR"
+cat > "${HOOK_DIR}/remnanode-hysteria.sh" <<EOF
+#!/usr/bin/env bash
+set -e
+cp -L "${LE_LIVE_DIR}/fullchain.pem" "${CERT_DIR}/cert.pem"
+cp -L "${LE_LIVE_DIR}/privkey.pem" "${CERT_DIR}/cert.key"
+chmod 644 "${CERT_DIR}/cert.pem"
+chmod 600 "${CERT_DIR}/cert.key"
+docker restart remnanode
+EOF
+chmod +x "${HOOK_DIR}/remnanode-hysteria.sh"
+echo ">> Добавлен deploy-hook для автообновления сертификата и рестарта контейнера"
+
+# --- Генерация docker-compose.yml ---
+mkdir -p "$COMPOSE_DIR"
+COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
+
+cat > "$COMPOSE_FILE" <<EOF
+services:
+  remnanode:
+    container_name: remnanode
+    hostname: remnanode
+    image: remnawave/node:latest
+    network_mode: host
+    restart: always
+    cap_add:
+      - NET_ADMIN
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    environment:
+      - NODE_PORT=2222
+      - SECRET_KEY=${SECRET_KEY}
+    volumes:
+      - ${CERT_DIR}:${CERT_DIR}:ro
+EOF
+
+echo ">> docker-compose.yml создан: ${COMPOSE_FILE}"
+echo ""
+echo "=== Готово ==="
+echo "Домен:      ${DOMAIN}"
+echo "Сертификат: ${CERT_DIR}/cert.pem / cert.key"
+echo "Compose:    ${COMPOSE_FILE}"
+echo ""
+echo "Дальше:"
+echo "  cd ${COMPOSE_DIR} && docker compose up -d"
