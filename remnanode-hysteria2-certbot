@@ -14,6 +14,31 @@ fi
 
 echo "=== Настройка сертификата для ноды Hysteria2 ==="
 
+# --- Docker + docker compose ставим сразу, до всего остального ---
+if ! command -v docker &>/dev/null; then
+  echo ">> Docker не найден, устанавливаю..."
+  apt-get update -y
+  if apt-get install -y docker.io docker-compose-plugin; then
+    :
+  else
+    echo ">> apt не смог поставить docker, пробую через get.docker.com..."
+    curl -fsSL https://get.docker.com | sh
+  fi
+  systemctl enable --now docker
+fi
+
+if ! docker compose version &>/dev/null; then
+  echo ">> Плагин 'docker compose' не найден, доустанавливаю..."
+  apt-get update -y
+  apt-get install -y docker-compose-plugin
+fi
+
+if ! docker compose version &>/dev/null; then
+  echo "Не удалось установить docker compose. Установи вручную и перезапусти скрипт." >&2
+  exit 1
+fi
+echo ">> Docker готов: $(docker --version)"
+
 read -rp "Введите домен ноды (например node-g1.benzin98.ru): " DOMAIN
 read -rp "Введите email для Let's Encrypt: " EMAIL
 read -rp "Введите SECRET_KEY ноды (из панели Remnawave): " SECRET_KEY
@@ -106,17 +131,6 @@ services:
 EOF
 
 echo ">> docker-compose.yml создан: ${COMPOSE_FILE}"
-
-# --- Проверка docker / docker compose ---
-if ! command -v docker &>/dev/null; then
-  echo ">> Docker не найден, устанавливаю..."
-  curl -fsSL https://get.docker.com | sh
-fi
-
-if ! docker compose version &>/dev/null; then
-  echo "Плагин 'docker compose' не найден. Установи docker-compose-plugin и перезапусти скрипт." >&2
-  exit 1
-fi
 
 # --- Запуск контейнера ---
 echo ">> Запускаю контейнер..."
