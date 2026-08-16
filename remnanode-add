@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ---------------------------------------------------------
+# Скрипт: установка ноды Remnawave (Docker + docker-compose)
+# БЕЗ выпуска сертификата — для нод, где свой TLS-сертификат
+# не нужен (например Reality-инбаунды, которые используют
+# чужой TLS-«фасад» и не требуют certbot/собственного домена).
+# ---------------------------------------------------------
+
+if [[ $EUID -ne 0 ]]; then
+  echo "Запусти скрипт от root (sudo)." >&2
+  exit 1
+fi
+
+echo "=== Установка ноды Remnawave (без сертификата) ==="
+
+# --- Docker + docker compose ---
+if ! command -v docker &>/dev/null; then
+  echo ">> Docker не найден, устанавливаю..."
+  apt-get update -y
+  if apt-get install -y docker.io docker-compose-plugin; then
+    :
+  else
+    echo ">> apt не смог поставить docker, пробую через get.docker.com..."
+    curl -fsSL https://get.docker.com | sh
+  fi
+  systemctl enable --now docker
+fi
+
+if ! docker compose version &>/dev/null; then
+  echo ">> Плагин 'docker compose' не найден, доустанавливаю..."
+  apt-get update -y
+  apt-get install -y docker-compose-plugin
+fi
+
+if ! docker compose version &>/dev/null; then
+  echo "Не удалось установить docker compose. Установи вручную и перезапусти скрипт." >&2
+  exit 1
+fi
+echo ">> Docker готов: $(docker --version)"
+
+read -rp "Введите SECRET_KEY ноды (из панели Remnawave): " SECRET_KEY
+
+if [[ -z "$SECRET_KEY" ]]; then
+  echo "SECRET_KEY обязателен." >&2
+  exit 1
+fi
+
+COMPOSE_DIR="/opt/remnanode"
+
+# --- Генерация docker-compose.yml (без volume с сертификатами) ---
+mkdir -p "$COMPOSE_DIR"
+COMPOSE_FILE="${COMPOSE_DIR}/docker-compose.yml"
+
+cat > "$COMPOSE_FILE" <<EOF
+services:
+  remnanode:
+    container_name: remnanode
+    hostname: remnanode
+    image: remnawave/node:latest
+    network_mode: host
+    restart: always
+    cap_add:
+      - NET_ADMIN
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    environment:
+      - NODE_PORT=2222
+      - SECRET_KEY=${SECRET_KEY}
+EOF
+
+echo ">> docker-compose.yml создан: ${COMPOSE_FILE}"
+
+# --- Запуск контейнера ---
+echo ">> Запускаю контейнер..."
+cd "$COMPOSE_DIR"
+docker compose up -d
+
+echo ""
+echo "=== Готово ==="
+echo "Compose: ${COMPOSE_FILE}"
+echo "Сертификат не выпускался — подходит только для инбаундов,"
+echo "которым не нужен свой домен/сертификат (например Reality)."
+echo ""
+docker compose ps
